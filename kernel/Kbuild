@@ -130,18 +130,26 @@ KSU_NEW_DCACHE_FLUSH := $(shell grep -q __flush_dcache_area $(srctree)/arch/arm6
 $(info -- KSU_NEW_DCACHE_FLUSH: $(KSU_NEW_DCACHE_FLUSH))
 
 
+# GhostLock fork defaults: trust our own manager (com.lixingchi.kernelsu),
+# signed with the RSA-2048 key kept at
+# /home/doccstat/data/local/ksu-manager/ghostlock-manager.jks. Its DER
+# certificate is 0x034b bytes and hashes to ff8c6f43...040050, which is what the
+# driver compares in kernel/manager/apk_sign.c. Override on the make command
+# line (the DDK passes these as `-e` values) to build for another signer.
 ifndef KSU_EXPECTED_SIZE
-KSU_EXPECTED_SIZE := 0x033b
+KSU_EXPECTED_SIZE := 0x034b
 endif
 
 ifndef KSU_EXPECTED_HASH
-KSU_EXPECTED_HASH := c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6
+KSU_EXPECTED_HASH := ff8c6f43e0bdd88057103c9faa5d78d7f43ee80a3c1ffa3e20eed06dcb640050
 endif
 
-ifdef KSU_MANAGER_PACKAGE
+ifndef KSU_MANAGER_PACKAGE
+KSU_MANAGER_PACKAGE := com.lixingchi.kernelsu
+endif
+
 ccflags-y += -DKSU_MANAGER_PACKAGE=\"$(KSU_MANAGER_PACKAGE)\"
 $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
-endif
 
 $(info -- KernelSU Manager signature size: $(KSU_EXPECTED_SIZE))
 $(info -- KernelSU Manager signature hash: $(KSU_EXPECTED_HASH))

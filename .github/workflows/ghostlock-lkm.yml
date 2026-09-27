@@ -1,0 +1,37 @@
+name: Build GhostLock LKM + ksud
+
+# Builds the rebranded LKM (`kernelsu.ko` for the Pixel 11 Pro Fold's
+# android16-6.12 KMI, bound to com.lixingchi.kernelsu / our manager signer by
+# kernel/Kbuild) and a ksud that embeds it.
+#
+# The manager APK is built separately (it needs the signing keystore): locally
+# with `gradlew assembleRelease -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu
+# -PKSU_NAME=GhostLock`, or through build-manager.yml with the keystore secrets.
+# The LKM and ksud do not need the keystore, so this workflow needs no secrets.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ghostlock-lkm.yml'
+      - '.github/workflows/ddk-lkm.yml'
+      - '.github/workflows/ksud.yml'
+      - 'kernel/**'
+      - 'userspace/**'
+      - 'uapi/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-lkm:
+    uses: ./.github/workflows/ddk-lkm.yml
+    with:
+      kmi: android16-6.12
+
+  build-ksud:
+    needs: build-lkm
+    uses: ./.github/workflows/ksud.yml
+    with:
+      target: aarch64-linux-android
+      pack_lkm: true
