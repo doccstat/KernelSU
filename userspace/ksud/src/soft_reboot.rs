@@ -149,6 +149,56 @@ fn wait_for_boot_completed() -> Result<()> {
     Ok(())
 }
 
+/// Re-drive every connected panel's power state after the userspace restart.
+///
+/// `stop`/`start` tears the Android display stack down and back up without
+/// resetting the DSI/DPU pipeline, so a secondary panel - for example the cover
+/// display of a foldable - can come back with stale DPMS/PSR state, which shows
+/// up as a small fixed artifact (the "three dots") or an occasional black
+/// screen. `cmd display power-reset` asks the framework to drive each connected
+/// display back to the power state it should have. It is a plain userspace
+/// request and never restarts the composer HAL, so unlike a composer restart it
+/// cannot crash-loop `system_server`. The DPMS off/on pair is a fallback for
+/// builds that do not expose `cmd display`.
+fn reset_display_power() {
+    let ids = match Command::new("/system/bin/cmd")
+        .args(["display", "get-displays", "--ids-only"])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(error) => {
+            warn!("display power reset skipped: {error:#}");
+            return;
+        }
+    };
+
+    let mut reset_any = false;
+    for id in ids.split_whitespace() {
+        if !id.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        match Command::new("/system/bin/cmd")
+            .args(["display", "power-reset", id])
+            .status()
+        {
+            Ok(status) if status.success() => reset_any = true,
+            Ok(status) => warn!("display power-reset {id} exited with {status}"),
+            Err(error) => warn!("display power-reset {id} failed: {error:#}"),
+        }
+    }
+
+    if reset_any {
+        return;
+    }
+    let _ = Command::new("/system/bin/input")
+        .args(["keyevent", "KEYCODE_SLEEP"])
+        .status();
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = Command::new("/system/bin/input")
+        .args(["keyevent", "KEYCODE_WAKEUP"])
+        .status();
+}
+
 pub fn soft_reboot() -> Result<()> {
     // check it avoid user click "soft_reboot" in manager when version mismatch
     if let Err(e) = ksucalls::ensure_uapi_version_matched() {
@@ -213,6 +263,11 @@ pub fn soft_reboot() -> Result<()> {
         warn!("wait for boot completed failed: {e}");
     }
     on_boot_completed();
+
+    // The display stack is only fully back a moment after BOOT_COMPLETED.
+    std::thread::sleep(Duration::from_secs(5));
+    info!("re-initialising panel power");
+    reset_display_power();
 
     unsafe {
         _exit(0);
