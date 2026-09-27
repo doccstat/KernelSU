@@ -1,123 +1,23 @@
 use std::{
-    fs::File,
-    io::Write,
-    os::fd::{AsRawFd, OwnedFd},
-    process::{Child, Command},
+    process::Command,
+    thread::sleep,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result};
 use libc::_exit;
 use log::{error, info, warn};
 use prop_rs_android::{resetprop::ResetProp, sys_prop};
-use rustix::{
-    event::{PollFd, PollFlags, poll},
-    fs::{MemfdFlags, Timespec, memfd_create},
-    io::{Errno, FdFlags, fcntl_getfd, fcntl_setfd, read},
-    pipe::{PipeFlags, pipe_with},
-    process::chdir,
-};
+use rustix::process::chdir;
 
 use crate::{
-    assets,
     init_event::{on_boot_completed, on_post_data_fs, on_services, run_stage},
     ksucalls,
     utils::{self, switch_mnt_ns},
 };
 
-const WAITSYS_FD_ENV: &str = "KSU_WAITSYS_FD";
-const WAITSYS_READY_TIMEOUT: Duration = Duration::from_secs(2);
-const WAITSYS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
-
-struct Waitsys {
-    child: Child,
-    read_fd: OwnedFd,
-}
-
-impl Waitsys {
-    fn spawn() -> Result<Self> {
-        let waitsys = assets::get_asset_data("waitsys").context("waitsys is not embedded")?;
-        let executable_fd = memfd_create("waitsys", MemfdFlags::CLOEXEC)
-            .context("failed to create waitsys memfd")?;
-        let mut executable = File::from(executable_fd);
-        executable
-            .write_all(&waitsys)
-            .context("failed to write waitsys to memfd")?;
-
-        let (read_fd, write_fd) =
-            pipe_with(PipeFlags::CLOEXEC).context("failed to create waitsys pipe")?;
-        fcntl_setfd(
-            &write_fd,
-            fcntl_getfd(&write_fd).context("get write_fd flags")? & !FdFlags::CLOEXEC,
-        )
-        .context("set write_fd flags")?;
-
-        let mut cmd = Command::new(format!("/proc/self/fd/{}", executable.as_raw_fd()));
-        cmd.env(WAITSYS_FD_ENV, format!("{}", write_fd.as_raw_fd()));
-        let child = cmd.spawn()?;
-
-        drop(write_fd);
-        drop(executable);
-        Ok(Self { child, read_fd })
-    }
-
-    fn wait_for_signal(&self, expected: u8, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                bail!("timed out waiting for signal {expected}");
-            }
-            let remaining = Timespec::try_from(remaining)?;
-            let mut poll_fd = [PollFd::new(&self.read_fd, PollFlags::IN)];
-            let ready = match poll(&mut poll_fd, Some(&remaining)) {
-                Err(Errno::INTR) => continue,
-                result => result,
-            }?;
-            if ready == 0 {
-                bail!("timed out waiting for signal {expected}");
-            }
-
-            let mut signal = [0_u8; 1];
-            let bytes_read = match read(&self.read_fd, &mut signal) {
-                Err(Errno::INTR) => continue,
-                result => result,
-            }?;
-            ensure!(
-                bytes_read == 1,
-                "waitsys pipe closed before signal {expected}"
-            );
-            let signal = signal[0];
-            ensure!(
-                signal == expected,
-                "unexpected waitsys signal {signal}, expected {expected}"
-            );
-            return Ok(());
-        }
-    }
-
-    fn terminate(&mut self) -> Result<()> {
-        self.child.kill().ok();
-        self.child.wait().context("wait for waitsys")?;
-        Ok(())
-    }
-}
-
-impl Drop for Waitsys {
-    fn drop(&mut self) {
-        if let Err(error) = self.terminate() {
-            warn!("failed to clean up waitsys: {error:#}");
-        }
-    }
-}
-
-fn terminate_waitsys(waitsys: &mut Option<Waitsys>) {
-    if let Some(mut waitsys) = waitsys.take()
-        && let Err(error) = waitsys.terminate()
-    {
-        warn!("failed to clean up waitsys: {error:#}");
-    }
-}
+/// How long to wait for `system_server` to actually exit after the kill.
+const FRAMEWORK_DOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 const fn resetprop() -> ResetProp {
     ResetProp {
@@ -149,54 +49,45 @@ fn wait_for_boot_completed() -> Result<()> {
     Ok(())
 }
 
-/// Re-drive every connected panel's power state after the userspace restart.
-///
-/// `stop`/`start` tears the Android display stack down and back up without
-/// resetting the DSI/DPU pipeline, so a secondary panel - for example the cover
-/// display of a foldable - can come back with stale DPMS/PSR state, which shows
-/// up as a small fixed artifact (the "three dots") or an occasional black
-/// screen. `cmd display power-reset` asks the framework to drive each connected
-/// display back to the power state it should have. It is a plain userspace
-/// request and never restarts the composer HAL, so unlike a composer restart it
-/// cannot crash-loop `system_server`. The DPMS off/on pair is a fallback for
-/// builds that do not expose `cmd display`.
-fn reset_display_power() {
-    let ids = match Command::new("/system/bin/cmd")
-        .args(["display", "get-displays", "--ids-only"])
+fn system_server_running() -> bool {
+    Command::new("pidof")
+        .arg("system_server")
         .output()
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Err(error) => {
-            warn!("display power reset skipped: {error:#}");
-            return;
-        }
-    };
+        .map(|output| !output.stdout.is_empty())
+        .unwrap_or(true)
+}
 
-    let mut reset_any = false;
-    for id in ids.split_whitespace() {
-        if !id.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        match Command::new("/system/bin/cmd")
-            .args(["display", "power-reset", id])
-            .status()
-        {
-            Ok(status) if status.success() => reset_any = true,
-            Ok(status) => warn!("display power-reset {id} exited with {status}"),
-            Err(error) => warn!("display power-reset {id} failed: {error:#}"),
-        }
+/// Restart only the Android framework.
+///
+/// This is deliberately *not* init's blanket `stop`/`start` that a stock
+/// `ksud soft-reboot` runs. `stop` tears the whole display stack down; on a
+/// foldable the cover panel then comes back with stale DPMS/PSR state, which
+/// shows up as a small fixed artifact (the "three dots"). Re-initialising the
+/// panel afterwards is not possible from userspace - restarting the composer HAL
+/// escalates to a RescueParty/recovery boot and unbinding the panel driver
+/// panics the kernel - so the panel must not be staled in the first place.
+///
+/// Killing only `system_server` is enough. init restarts it (and `zygote64`, so
+/// a Zygisk/Xposed module installed after the LKM load is re-injected) while
+/// SurfaceFlinger and the composer HAL keep running.
+fn restart_framework() -> Result<()> {
+    let status = Command::new("killall")
+        .args(["-9", "system_server"])
+        .status()
+        .context("killall system_server failed")?;
+    if !status.success() {
+        warn!("killall exited with status: {status}");
     }
 
-    if reset_any {
-        return;
+    let deadline = Instant::now() + FRAMEWORK_DOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if !system_server_running() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100));
     }
-    let _ = Command::new("/system/bin/input")
-        .args(["keyevent", "KEYCODE_SLEEP"])
-        .status();
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = Command::new("/system/bin/input")
-        .args(["keyevent", "KEYCODE_WAKEUP"])
-        .status();
+    warn!("system_server still running after killall; continuing");
+    Ok(())
 }
 
 pub fn soft_reboot() -> Result<()> {
@@ -218,56 +109,21 @@ pub fn soft_reboot() -> Result<()> {
     }
     run_stage("emulated-soft-reboot", true);
 
-    let mut waitsys = match Waitsys::spawn() {
-        Ok(waitsys) => Some(waitsys),
-        Err(error) => {
-            warn!("failed to start waitsys: {error:#}");
-            None
-        }
-    };
-    let wait_after_stop = waitsys.as_ref().is_some_and(|waitsys| {
-        if let Err(error) = waitsys.wait_for_signal(1, WAITSYS_READY_TIMEOUT) {
-            warn!("waitsys failed to collect services: {error:#}");
-            false
-        } else {
-            true
-        }
-    });
-    if !wait_after_stop {
-        terminate_waitsys(&mut waitsys);
-    }
+    info!("restarting the framework (zygote + system_server)");
+    restart_framework()?;
 
-    info!("stop");
-    let status = Command::new("stop").status().context("stop failed")?;
-    if !status.success() {
-        warn!("stop exited with status: {status}");
-    }
-
-    if let Some(waitsys) = waitsys.as_ref()
-        && let Err(error) = waitsys.wait_for_signal(2, WAITSYS_STOP_TIMEOUT)
-    {
-        warn!("waitsys failed while waiting for services to stop: {error:#}");
-    }
-    terminate_waitsys(&mut waitsys);
-
+    // `post-fs-data` has to run while the framework is down, which is why it
+    // goes before the wait for BOOT_COMPLETED; `service` and `boot-completed`
+    // run once it is back, exactly like a real boot.
     info!("post-fs-data");
     on_post_data_fs()?;
-    info!("start");
-    let status = Command::new("start").status().context("start failed")?;
-    if !status.success() {
-        warn!("start exited with status: {status}");
-    }
-    info!("services");
-    on_services();
+
     if let Err(e) = wait_for_boot_completed() {
         warn!("wait for boot completed failed: {e}");
     }
+    info!("services");
+    on_services();
     on_boot_completed();
-
-    // The display stack is only fully back a moment after BOOT_COMPLETED.
-    std::thread::sleep(Duration::from_secs(5));
-    info!("re-initialising panel power");
-    reset_display_power();
 
     unsafe {
         _exit(0);
