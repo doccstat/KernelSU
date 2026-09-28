@@ -53,8 +53,7 @@ fn system_server_running() -> bool {
     Command::new("pidof")
         .arg("system_server")
         .output()
-        .map(|output| !output.stdout.is_empty())
-        .unwrap_or(true)
+        .map_or(true, |output| !output.stdout.is_empty())
 }
 
 /// Restart only the Android framework.
