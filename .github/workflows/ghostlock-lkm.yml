@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           if [ -z "$RMP_DISPATCH_TOKEN" ]; then
             echo "RMP_DISPATCH_TOKEN is not set; skipping the cross-repository dispatch."
-            echo "Root-My-Pixel still picks the release up on its daily/manual build."
+            echo "Root-My-Pixel still picks the release up on its next push or manual build."
             exit 0
           fi
           GH_TOKEN="$RMP_DISPATCH_TOKEN" gh api \
