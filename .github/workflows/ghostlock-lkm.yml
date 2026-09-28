@@ -60,13 +60,17 @@ jobs:
           # A fixed tag/asset name lets another repository fetch a stable URL
           # (https://github.com/<repo>/releases/download/ghostlock-latest/ksud)
           # without any cross-repository token.
-          if ! gh release view ghostlock-latest >/dev/null 2>&1; then
+          # Every command passes --repo explicitly: this job has no checkout,
+          # so gh cannot infer the repository from a git remote.
+          if ! gh release view ghostlock-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create ghostlock-latest \
+              --repo "$GITHUB_REPOSITORY" \
               --title "GhostLock CI artifacts" \
               --notes "Rolling ksud built by ghostlock-lkm.yml from the GhostLock KernelSU fork."
           fi
-          gh release upload ghostlock-latest dist/ksud/ksud dist/ksud/ksud.sha256 --clobber
-          gh release view ghostlock-latest --json assets \
+          gh release upload ghostlock-latest --repo "$GITHUB_REPOSITORY" \
+            dist/ksud/ksud dist/ksud/ksud.sha256 --clobber
+          gh release view ghostlock-latest --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "\(.name) \(.size) bytes"'
 
       - name: Notify Root-My-Pixel (optional)
