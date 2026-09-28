@@ -420,12 +420,15 @@ jobs:
           }
           EOF
 
-          if ! gh release view ghostlock-latest >/dev/null 2>&1; then
+          # Every command passes --repo explicitly: this job has no checkout,
+          # so gh cannot infer the repository from a git remote.
+          if ! gh release view ghostlock-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create ghostlock-latest \
+              --repo "$GITHUB_REPOSITORY" \
               --title "GhostLock CI artifacts" \
               --notes "Rolling ksud (and manager) built by the GhostLock KernelSU fork."
           fi
-          gh release upload ghostlock-latest \
+          gh release upload ghostlock-latest --repo "$GITHUB_REPOSITORY" \
             dist/GhostLock-manager.apk \
             dist/GhostLock-manager.apk.sha256 \
             dist/manager.json \
