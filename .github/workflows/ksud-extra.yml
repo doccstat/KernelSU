@@ -42,10 +42,14 @@ jobs:
     - name: Prepare ksuinit
       if: ${{ inputs.pack_ksuinit }}
       run: |
-        mv ksuinit-aarch64/ksuinit ./userspace/ksud/bin/aarch64/
-        mv ksuinit-x86_64/ksuinit ./userspace/ksud/bin/x86_64/
-        mv ksuinit-riscv64/ksuinit ./userspace/ksud/bin/riscv64/
-        
+        # Only aarch64 is built now; guard the rest so a partial set of
+        # ksuinit-* artifacts never fails the build.
+        for arch in aarch64 x86_64 riscv64; do
+          if [ -f "ksuinit-$arch/ksuinit" ]; then
+            mv "ksuinit-$arch/ksuinit" "./userspace/ksud/bin/$arch/"
+          fi
+        done
+
     - name: Setup rustup
       run: |
         rustup update stable
