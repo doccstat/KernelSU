@@ -8,7 +8,6 @@ on:
       - '.github/workflows/build-lkm.yml'
       - '.github/workflows/ddk-lkm.yml'
       - '.github/workflows/ksud.yml'
-      - '.github/workflows/ksud-extra.yml'
       - '.github/workflows/ksuinit.yml'
       - '.github/scripts/setup-rust-build.sh'
       - '.github/riscv64-cargo.toml'
@@ -25,7 +24,6 @@ on:
       - '.github/workflows/build-lkm.yml'
       - '.github/workflows/ddk-lkm.yml'
       - '.github/workflows/ksud.yml'
-      - '.github/workflows/ksud-extra.yml'
       - '.github/workflows/ksuinit.yml'
       - '.github/scripts/setup-rust-build.sh'
       - '.github/riscv64-cargo.toml'
@@ -120,29 +118,6 @@ jobs:
       pack_ksuinit: true
       ksu_package_name: com.lixingchi.kernelsu
   
-  build-ksud-extra:
-    needs: [build-lkm, build-ksuinit]
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-pc-windows-gnu # windows pc
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin # Intel mac
-            os: macos-latest
-          - target: aarch64-apple-darwin # M chip mac
-            os: macos-latest
-          - target: aarch64-unknown-linux-musl # arm64 Linux
-            os: ubuntu-latest
-          - target: x86_64-unknown-linux-musl # x86 Linux
-            os: ubuntu-latest
-    uses: ./.github/workflows/ksud-extra.yml
-    with:
-      target: ${{ matrix.target }}
-      os: ${{ matrix.os }}
-      pack_lkm: true
-      pack_ksuinit: true
-      ksu_package_name: com.lixingchi.kernelsu
-
   build-manager:
     needs: [generate-key]
     if: always() && needs.generate-key.result == 'success'
