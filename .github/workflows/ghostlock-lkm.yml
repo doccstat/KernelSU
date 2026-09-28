@@ -35,3 +35,4 @@ jobs:
     with:
       target: aarch64-linux-android
       pack_lkm: true
+      ksu_package_name: com.lixingchi.kernelsu
