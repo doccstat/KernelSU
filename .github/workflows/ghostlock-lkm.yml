@@ -36,3 +36,50 @@ jobs:
       target: aarch64-linux-android
       pack_lkm: true
       ksu_package_name: com.lixingchi.kernelsu
+
+  publish-ksud:
+    needs: build-ksud
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built ksud
+        uses: actions/download-artifact@v8
+        with:
+          name: ksud-aarch64-linux-android
+          path: dist/ksud
+
+      - name: Publish the rolling GhostLock release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          chmod +x dist/ksud/ksud
+          (cd dist/ksud && sha256sum ksud > ksud.sha256)
+          # A fixed tag/asset name lets another repository fetch a stable URL
+          # (https://github.com/<repo>/releases/download/ghostlock-latest/ksud)
+          # without any cross-repository token.
+          if ! gh release view ghostlock-latest >/dev/null 2>&1; then
+            gh release create ghostlock-latest \
+              --title "GhostLock CI artifacts" \
+              --notes "Rolling ksud built by ghostlock-lkm.yml from the GhostLock KernelSU fork."
+          fi
+          gh release upload ghostlock-latest dist/ksud/ksud dist/ksud/ksud.sha256 --clobber
+          gh release view ghostlock-latest --json assets \
+            --jq '.assets[] | "\(.name) \(.size) bytes"'
+
+      - name: Notify Root-My-Pixel (optional)
+        env:
+          RMP_DISPATCH_TOKEN: ${{ secrets.RMP_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RMP_DISPATCH_TOKEN" ]; then
+            echo "RMP_DISPATCH_TOKEN is not set; skipping the cross-repository dispatch."
+            echo "Root-My-Pixel still picks the release up on its daily/manual build."
+            exit 0
+          fi
+          GH_TOKEN="$RMP_DISPATCH_TOKEN" gh api \
+            --method POST \
+            repos/doccstat/Root-My-Pixel/dispatches \
+            -f event_type=ghostlock-ksud-published
