@@ -1,6 +1,10 @@
 name: Build Manager
 
 on:
+  # Manual runs (main only) execute the full signed-manager pipeline and, when
+  # the production keystore secret is present, publish + dispatch the manager.
+  # The rolling LKM/ksud release stays ghostlock-lkm.yml's job.
+  workflow_dispatch:
   push:
     branches: [ "main", "dev", "ci" ]
     paths:
@@ -328,9 +332,12 @@ jobs:
     # Root-My-Pixel fetches it from there, so the bundled manager and the
     # prepacked ksud/LKM never drift. Only main + the production key (the
     # repack-manager job already skips without KEYSTORE).
+    # Runs on a push to main and, now, on a manual workflow_dispatch from main;
+    # repack-manager already requires the production key (or a PR), so this
+    # stays main-only and key-gated.
     if: >-
       always() && needs.repack-manager.result == 'success' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
