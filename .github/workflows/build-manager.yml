@@ -117,6 +117,7 @@ jobs:
       target: ${{ matrix.target }}
       pack_lkm: true
       pack_ksuinit: true
+      ksu_package_name: com.lixingchi.kernelsu
   
   build-ksud-extra:
     needs: [build-lkm, build-ksuinit]
@@ -139,6 +140,7 @@ jobs:
       os: ${{ matrix.os }}
       pack_lkm: true
       pack_ksuinit: true
+      ksu_package_name: com.lixingchi.kernelsu
 
   build-manager:
     needs: [generate-key]
@@ -193,10 +195,14 @@ jobs:
 
       - name: Build with Gradle
         run: |
+          # GhostLock rebrand: the fork's kernel/Kbuild binds the driver to
+          # com.lixingchi.kernelsu, so the manager must use the same package.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew clean assembleRelease -PIS_PR_BUILD=true
+            ./gradlew clean assembleRelease -PIS_PR_BUILD=true \
+              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=GhostLock
           else
-            ./gradlew clean assembleRelease
+            ./gradlew clean assembleRelease \
+              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=GhostLock
           fi
 
       - name: Upload build artifact
@@ -213,9 +219,26 @@ jobs:
           name: "mappings"
           path: "manager/app/build/outputs/mapping/release/"
 
+  check-signing:
+    runs-on: ubuntu-latest
+    outputs:
+      have_key: ${{ steps.check.outputs.have_key }}
+    steps:
+      - name: Check for the production signing secret
+        id: check
+        env:
+          PROD_KEYSTORE: ${{ secrets.KEYSTORE }}
+        run: |
+          if [ -n "$PROD_KEYSTORE" ]; then
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No KEYSTORE secret is configured; skipping the signed manager repack. Add KEYSTORE, KEY_ALIAS, KEYSTORE_PASSWORD, and KEY_PASSWORD to enable it."
+          fi
+
   repack-manager:
-    needs: [build-manager, build-ksud, generate-key]
-    if: always() && needs.build-manager.result == 'success' && needs.build-ksud.result == 'success' && needs.generate-key.result == 'success'
+    needs: [build-manager, build-ksud, generate-key, check-signing]
+    if: always() && needs.build-manager.result == 'success' && needs.build-ksud.result == 'success' && needs.generate-key.result == 'success' && (github.event_name == 'pull_request' || needs.check-signing.outputs.have_key == 'true')
     runs-on: ubuntu-latest
 
     steps:

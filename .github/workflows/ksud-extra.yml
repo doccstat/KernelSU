@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      ksu_package_name:
+        description: 'Manager package ksud compiles in as its default (empty keeps upstream)'
+        required: false
+        type: string
+        default: ''
 jobs:
   build:
     runs-on: ${{ inputs.os }}
@@ -64,7 +69,11 @@ jobs:
           userspace/ksud/src/lkm_image_bootstrap.S
 
     - name: Build ksud
-      run: CROSS_NO_WARNINGS=0 cross build --target ${{ inputs.target }} --release --manifest-path ./userspace/ksud/Cargo.toml
+      run: |
+        if [ -n "${{ inputs.ksu_package_name }}" ]; then
+          export KSU_PACKAGE_NAME="${{ inputs.ksu_package_name }}"
+        fi
+        CROSS_NO_WARNINGS=0 cross build --target ${{ inputs.target }} --release --manifest-path ./userspace/ksud/Cargo.toml
 
     - name: Upload ksud artifact
       uses: actions/upload-artifact@v7

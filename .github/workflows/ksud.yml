@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      ksu_package_name:
+        description: 'Manager package ksud compiles in as its default (empty keeps upstream)'
+        required: false
+        type: string
+        default: ''
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -62,6 +67,9 @@ jobs:
       run: |
         if [ "${{ github.event_name }}" = "pull_request" ]; then
           export KSU_PACKAGE_NAME="me.weishu.kernelsu.pr"
+        fi
+        if [ -n "${{ inputs.ksu_package_name }}" ]; then
+          export KSU_PACKAGE_NAME="${{ inputs.ksu_package_name }}"
         fi
         if [ "${{ inputs.target }}" = riscv64-linux-android ]; then
           source .github/scripts/setup-rust-build.sh riscv64-linux-android 35
