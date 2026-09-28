@@ -365,3 +365,84 @@ jobs:
             pip3 install telethon
             python3 $GITHUB_WORKSPACE/scripts/ksubot.py $APK
           fi
+
+  publish-manager:
+    needs: [repack-manager]
+    # Publishes the signed manager to the same rolling `ghostlock-latest`
+    # release that ghostlock-lkm.yml uses for ksud, under a stable asset name
+    # (https://github.com/<repo>/releases/download/ghostlock-latest/GhostLock-manager.apk).
+    # Root-My-Pixel fetches it from there, so the bundled manager and the
+    # prepacked ksud/LKM never drift. Only main + the production key (the
+    # repack-manager job already skips without KEYSTORE).
+    if: >-
+      always() && needs.repack-manager.result == 'success' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the repacked manager
+        uses: actions/download-artifact@v8
+        with:
+          name: manager
+          path: dist/manager
+
+      - name: Publish the rolling GhostLock release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APK=$(find dist/manager -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          stem="$(basename "$APK" .apk)"   # GhostLock_<versionName>_<versionCode>-release
+          version_code="$(printf '%s' "$stem" | sed -E 's/.*_([0-9]+)-release$/\1/')"
+          version_name="$(printf '%s' "$stem" | sed -E 's/^[^_]*_(.*)_[0-9]+-release$/\1/')"
+          if ! printf '%s' "$version_code" | grep -Eq '^[0-9]+$'; then
+            echo "::error::Could not read a versionCode from artifact name '$stem'"
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp -f "$APK" dist/GhostLock-manager.apk
+          (cd dist && sha256sum GhostLock-manager.apk > GhostLock-manager.apk.sha256)
+          sha="$(cut -d' ' -f1 dist/GhostLock-manager.apk.sha256)"
+          size="$(stat -c%s dist/GhostLock-manager.apk)"
+          # The driver pins com.lixingchi.kernelsu (kernel/Kbuild), so the
+          # manager must too; assert it instead of just trusting the build.
+          cat > dist/manager.json <<EOF
+          {
+            "package": "com.lixingchi.kernelsu",
+            "versionCode": $version_code,
+            "versionName": "$version_name",
+            "asset": "GhostLock-manager.apk",
+            "sha256": "$sha",
+            "size": $size
+          }
+          EOF
+
+          if ! gh release view ghostlock-latest >/dev/null 2>&1; then
+            gh release create ghostlock-latest \
+              --title "GhostLock CI artifacts" \
+              --notes "Rolling ksud (and manager) built by the GhostLock KernelSU fork."
+          fi
+          gh release upload ghostlock-latest \
+            dist/GhostLock-manager.apk \
+            dist/GhostLock-manager.apk.sha256 \
+            dist/manager.json \
+            --clobber
+          cat dist/manager.json
+
+      - name: Notify Root-My-Pixel (optional)
+        env:
+          RMP_DISPATCH_TOKEN: ${{ secrets.RMP_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RMP_DISPATCH_TOKEN" ]; then
+            echo "RMP_DISPATCH_TOKEN is not set; skipping the cross-repository dispatch."
+            echo "Root-My-Pixel still picks the manager up on its daily/manual build."
+            exit 0
+          fi
+          GH_TOKEN="$RMP_DISPATCH_TOKEN" gh api \
+            --method POST \
+            repos/doccstat/Root-My-Pixel/dispatches \
+            -f event_type=ghostlock-manager-published
