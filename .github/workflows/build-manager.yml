@@ -21,6 +21,8 @@ on:
       - 'userspace/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - 'uapi/**'
+      - 'scripts/test_yogi_contract.py'
   pull_request:
     branches: [ "main", "dev" ]
     paths:
@@ -37,6 +39,8 @@ on:
       - 'userspace/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - 'uapi/**'
+      - 'scripts/test_yogi_contract.py'
   workflow_call:
 
 jobs:
@@ -99,8 +103,9 @@ jobs:
     needs: generate-key
     uses: ./.github/workflows/build-lkm.yml
     with:
-      expected_size2: ${{ needs.generate-key.outputs.expected_size || '' }}
-      expected_hash2: ${{ needs.generate-key.outputs.expected_hash || '' }}
+      package_name: com.lixingchi.kernelsu
+      expected_size: ${{ needs.generate-key.outputs.expected_size || '' }}
+      expected_hash: ${{ needs.generate-key.outputs.expected_hash || '' }}
     secrets: inherit
 
   build-ksuinit:
@@ -135,6 +140,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Check fork integration contracts
+        run: python3 ../scripts/test_yogi_contract.py -v
 
       - name: Write key
         if: ${{ ( github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' )) || github.ref_type == 'tag' }}
@@ -177,10 +185,10 @@ jobs:
         run: |
           # Keep the driver-bound package; only the visible name is KernelSU.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew clean assembleRelease -PIS_PR_BUILD=true \
+            ./gradlew clean testReleaseUnitTest assembleRelease -PIS_PR_BUILD=true \
               -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           else
-            ./gradlew clean assembleRelease \
+            ./gradlew clean testReleaseUnitTest assembleRelease \
               -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           fi
 
@@ -328,8 +336,8 @@ jobs:
     # Publishes the signed manager to the same rolling `ghostlock-latest`
     # release that ghostlock-lkm.yml uses for ksud, retaining the legacy asset name
     # (https://github.com/<repo>/releases/download/ghostlock-latest/GhostLock-manager.apk).
-    # Root-My-Pixel fetches it from there, so the bundled manager and the
-    # prepacked ksud/LKM never drift. Only main + the production key (the
+    # Root-My-Pixel extracts this APK's embedded ksud/LKMs, rather than mixing
+    # it with the independently published ksud. Only main + the production key (the
     # repack-manager job already skips without KEYSTORE).
     # Runs on a push to main and, now, on a manual workflow_dispatch from main;
     # repack-manager already requires the production key (or a PR), so this
@@ -367,11 +375,14 @@ jobs:
           (cd dist && sha256sum GhostLock-manager.apk > GhostLock-manager.apk.sha256)
           sha="$(cut -d' ' -f1 dist/GhostLock-manager.apk.sha256)"
           size="$(stat -c%s dist/GhostLock-manager.apk)"
-          # The driver pins com.lixingchi.kernelsu (kernel/Kbuild), so the
-          # manager must too; assert it instead of just trusting the build.
+          # Record the build contract; RMP verifies the APK's actual identity
+          # and signer before accepting this metadata and its embedded daemon.
           cat > dist/manager.json <<EOF
           {
             "package": "com.lixingchi.kernelsu",
+            "sourceCommit": "$GITHUB_SHA",
+            "upstreamCommit": "96770dfb807fea61e06819e4cbb438384df54b63",
+            "uapiVersion": 6,
             "versionCode": $version_code,
             "versionName": "$version_name",
             "asset": "GhostLock-manager.apk",
