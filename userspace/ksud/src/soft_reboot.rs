@@ -11,8 +11,10 @@ use prop_rs_android::{resetprop::ResetProp, sys_prop};
 use rustix::process::chdir;
 
 use crate::{
-    init_event::{on_boot_completed, on_post_data_fs, on_services, run_stage},
+    defs,
+    init_event::{on_boot_completed, on_post_fs_data, on_services, run_stage},
     ksucalls,
+    module::ScriptWait,
     utils::{self, switch_mnt_ns},
 };
 
@@ -106,7 +108,10 @@ pub fn soft_reboot() -> Result<()> {
     if let Err(e) = reset_boot_completed() {
         warn!("reset boot completed failed: {e}");
     }
-    run_stage("emulated-soft-reboot", true);
+    run_stage(
+        "emulated-soft-reboot",
+        ScriptWait::Until(Instant::now() + defs::EMULATED_SOFT_REBOOT_TIMEOUT),
+    );
 
     info!("restarting the framework (zygote + system_server)");
     restart_framework()?;
@@ -115,7 +120,7 @@ pub fn soft_reboot() -> Result<()> {
     // goes before the wait for BOOT_COMPLETED; `service` and `boot-completed`
     // run once it is back, exactly like a real boot.
     info!("post-fs-data");
-    on_post_data_fs()?;
+    on_post_fs_data()?;
 
     if let Err(e) = wait_for_boot_completed() {
         warn!("wait for boot completed failed: {e}");

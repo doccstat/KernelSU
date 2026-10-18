@@ -28,6 +28,7 @@ jobs:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
       kmi: android16-6.12
+      package_name: com.lixingchi.kernelsu
 
   build-ksud:
     needs: build-lkm
