@@ -6,7 +6,7 @@ name: Build GhostLock LKM + ksud
 #
 # The manager APK is built separately (it needs the signing keystore): locally
 # with `gradlew assembleRelease -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu
-# -PKSU_NAME=GhostLock`, or through build-manager.yml with the keystore secrets.
+# -PKSU_NAME=KernelSU`, or through build-manager.yml with the keystore secrets.
 # The LKM and ksud do not need the keystore, so this workflow needs no secrets.
 
 on:

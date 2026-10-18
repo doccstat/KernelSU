@@ -108,7 +108,7 @@ jobs:
 
   build-ksud:
     needs: [build-lkm, build-ksuinit]
-    # Only arm64-v8a: the GhostLock manager is repacked arm64-only below, and
+    # Only arm64-v8a: the fork manager is repacked arm64-only below, and
     # the device the driver targets is arm64, so the other Android targets would
     # only bloat the bundled manager APK.
     strategy:
@@ -175,14 +175,13 @@ jobs:
 
       - name: Build with Gradle
         run: |
-          # GhostLock rebrand: the fork's kernel/Kbuild binds the driver to
-          # com.lixingchi.kernelsu, so the manager must use the same package.
+          # Keep the driver-bound package; only the visible name is KernelSU.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             ./gradlew clean assembleRelease -PIS_PR_BUILD=true \
-              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=GhostLock
+              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           else
             ./gradlew clean assembleRelease \
-              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=GhostLock
+              -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           fi
 
       - name: Upload build artifact
@@ -327,7 +326,7 @@ jobs:
   publish-manager:
     needs: [repack-manager]
     # Publishes the signed manager to the same rolling `ghostlock-latest`
-    # release that ghostlock-lkm.yml uses for ksud, under a stable asset name
+    # release that ghostlock-lkm.yml uses for ksud, retaining the legacy asset name
     # (https://github.com/<repo>/releases/download/ghostlock-latest/GhostLock-manager.apk).
     # Root-My-Pixel fetches it from there, so the bundled manager and the
     # prepacked ksud/LKM never drift. Only main + the production key (the
@@ -355,7 +354,7 @@ jobs:
           set -euo pipefail
           APK=$(find dist/manager -type f -name '*.apk' | head -n 1)
           test -n "$APK"
-          stem="$(basename "$APK" .apk)"   # GhostLock_<versionName>_<versionCode>-release
+          stem="$(basename "$APK" .apk)"   # KernelSU_<versionName>_<versionCode>-release
           version_code="$(printf '%s' "$stem" | sed -E 's/.*_([0-9]+)-release$/\1/')"
           version_name="$(printf '%s' "$stem" | sed -E 's/^[^_]*_(.*)_[0-9]+-release$/\1/')"
           if ! printf '%s' "$version_code" | grep -Eq '^[0-9]+$'; then
