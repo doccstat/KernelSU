@@ -52,8 +52,16 @@ class YogiContractTest(unittest.TestCase):
         self.assertIn("kmi: android16-6.12", source(".github/workflows/ghostlock-lkm.yml"))
         self.assertIn("fetch-depth: 0", source(".github/workflows/ddk-lkm.yml"))
         self.assertIn("-a arm64-v8a", manager)
-        self.assertEqual(manager.count("testReleaseUnitTest"), 2)
+        self.assertEqual(manager.count(":app:testDebugUnitTest"), 2)
+        self.assertNotIn("testReleaseUnitTest", manager)
         self.assertIn("GhostLock-manager.apk", manager)
+        self.assertNotIn("ghostlock-ksud-published", source(".github/workflows/ghostlock-lkm.yml"))
+
+    def test_pages_requires_upstream_or_explicit_fork_opt_in(self):
+        pages = source(".github/workflows/deploy-website.yml")
+        self.assertIn("    if: github.repository == 'tiann/KernelSU' || vars.ENABLE_PAGES == 'true'", pages)
+        self.assertIn("    needs: build", pages)
+        self.assertNotIn("enablement: true", pages)
 
     def test_framework_only_restart_and_service_order(self):
         restart = re.sub(r"//[^\n]*", "", source("userspace/ksud/src/soft_reboot.rs"))
