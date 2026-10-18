@@ -25,6 +25,8 @@ concurrency:
 jobs:
   # Build job
   build:
+    # Forks must configure a Pages site and explicitly opt in before deployment.
+    if: github.repository == 'tiann/KernelSU' || vars.ENABLE_PAGES == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:

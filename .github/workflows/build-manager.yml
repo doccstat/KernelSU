@@ -185,10 +185,10 @@ jobs:
         run: |
           # Keep the driver-bound package; only the visible name is KernelSU.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew clean testReleaseUnitTest assembleRelease -PIS_PR_BUILD=true \
+            ./gradlew clean :app:testDebugUnitTest assembleRelease -PIS_PR_BUILD=true \
               -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           else
-            ./gradlew clean testReleaseUnitTest assembleRelease \
+            ./gradlew clean :app:testDebugUnitTest assembleRelease \
               -PKSU_PACKAGE_NAME=com.lixingchi.kernelsu -PKSU_NAME=KernelSU
           fi
 

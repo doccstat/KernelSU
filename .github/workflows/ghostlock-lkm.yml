@@ -81,18 +81,3 @@ jobs:
             dist/ksud/ksud dist/ksud/ksud.sha256 --clobber
           gh release view ghostlock-latest --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "\(.name) \(.size) bytes"'
-
-      - name: Notify Root-My-Pixel (optional)
-        env:
-          RMP_DISPATCH_TOKEN: ${{ secrets.RMP_DISPATCH_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$RMP_DISPATCH_TOKEN" ]; then
-            echo "RMP_DISPATCH_TOKEN is not set; skipping the cross-repository dispatch."
-            echo "Root-My-Pixel still picks the release up on its next push or manual build."
-            exit 0
-          fi
-          GH_TOKEN="$RMP_DISPATCH_TOKEN" gh api \
-            --method POST \
-            repos/doccstat/Root-My-Pixel/dispatches \
-            -f event_type=ghostlock-ksud-published
