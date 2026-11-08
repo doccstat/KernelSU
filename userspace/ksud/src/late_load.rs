@@ -88,7 +88,7 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
         warn!("handle updated modules failed: {e}");
     }
 
-    if let Err(e) = prune_modules() {
+    if let Err(e) = prune_modules(ScriptWait::Forever) {
         warn!("prune modules failed: {e}");
     }
 
@@ -121,7 +121,7 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     }
 
     // 10. Execute metamodule mount script (OverlayFS)
-    if let Err(e) = metamodule::exec_mount_script(defs::MODULE_DIR) {
+    if let Err(e) = metamodule::exec_mount_script(defs::MODULE_DIR, ScriptWait::Forever) {
         warn!("execute metamodule mount failed: {e}");
     }
 

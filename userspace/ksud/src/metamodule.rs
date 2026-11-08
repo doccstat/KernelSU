@@ -4,16 +4,15 @@
 //! Metamodules are special modules that manage how regular modules are mounted
 //! and provide hooks for module installation/uninstallation.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use log::{info, warn};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
 };
 
+use crate::defs;
 use crate::module::{ModuleType::All, ScriptWait};
-use crate::{assets, defs};
 
 /// Determine whether the provided module properties mark it as a metamodule
 pub fn is_metamodule(props: &HashMap<String, String>) -> bool {
@@ -64,15 +63,6 @@ pub fn get_metamodule_path() -> Option<PathBuf> {
     });
 
     result
-}
-
-/// Get Metamodule Id
-pub fn get_metamodule_id() -> Option<String> {
-    get_metamodule_path().and_then(|path| {
-        path.file_name()
-            .and_then(|os_str| os_str.to_str())
-            .map(ToString::to_string)
-    })
 }
 
 /// Check if metamodule exists
@@ -209,8 +199,11 @@ fn check_metamodule_script(script_name: &str) -> Option<PathBuf> {
     let metamodule_path = get_metamodule_path()?;
 
     // Check if metamodule is disabled
-    if metamodule_path.join(defs::DISABLE_FILE_NAME).exists() {
-        info!("Metamodule is disabled, skipping {script_name}");
+    if script_name != "emulated-soft-reboot.sh"
+        && (metamodule_path.join(defs::DISABLE_FILE_NAME).exists()
+            || metamodule_path.join(defs::REMOVE_FILE_NAME).exists())
+    {
+        info!("Metamodule is disabled or removed, skipping {script_name}");
         return None;
     }
 
@@ -224,7 +217,7 @@ fn check_metamodule_script(script_name: &str) -> Option<PathBuf> {
 }
 
 /// Execute metamodule's metauninstall.sh for a specific module
-pub fn exec_metauninstall_script(module_id: &str) -> Result<()> {
+pub fn exec_metauninstall_script(module_id: &str, wait: ScriptWait) -> Result<()> {
     let Some(metauninstall_path) = check_metamodule_script(defs::METAMODULE_METAUNINSTALL_SCRIPT)
     else {
         return Ok(());
@@ -232,44 +225,25 @@ pub fn exec_metauninstall_script(module_id: &str) -> Result<()> {
 
     info!("Executing metamodule metauninstall.sh for module: {module_id}");
 
-    let result = Command::new(assets::BUSYBOX_PATH)
-        .args(["sh", metauninstall_path.to_str().unwrap()])
-        .current_dir(metauninstall_path.parent().unwrap())
-        .envs(crate::module::get_common_script_envs(
-            get_metamodule_id().as_deref(),
-        ))
-        .env("MODULE_ID", module_id)
-        .status()?;
-
-    ensure!(
-        result.success(),
-        "Metamodule metauninstall.sh failed for module {module_id}: {result:?}"
-    );
+    crate::module::exec_script_with(&metauninstall_path, wait, |command| {
+        command.env("MODULE_ID", module_id);
+    })?;
 
     info!("Metamodule metauninstall.sh executed successfully for {module_id}");
     Ok(())
 }
 
 /// Execute metamodule mount script
-pub fn exec_mount_script(module_dir: &str) -> Result<()> {
+pub fn exec_mount_script(module_dir: &str, wait: ScriptWait) -> Result<()> {
     let Some(mount_script) = check_metamodule_script(defs::METAMODULE_MOUNT_SCRIPT) else {
         return Ok(());
     };
 
     info!("Executing mount script for metamodule");
 
-    let result = Command::new(assets::BUSYBOX_PATH)
-        .args(["sh", mount_script.to_str().unwrap()])
-        .envs(crate::module::get_common_script_envs(
-            get_metamodule_id().as_deref(),
-        ))
-        .env("MODULE_DIR", module_dir)
-        .status()?;
-
-    ensure!(
-        result.success(),
-        "Metamodule mount script failed with status: {result:?}"
-    );
+    crate::module::exec_script_with(&mount_script, wait, |command| {
+        command.env("MODULE_DIR", module_dir);
+    })?;
 
     info!("Metamodule mount script executed successfully");
     Ok(())

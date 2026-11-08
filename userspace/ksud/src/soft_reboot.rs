@@ -1,135 +1,179 @@
 use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     process::Command,
     thread::sleep,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
-use libc::_exit;
+use anyhow::{Context, Result, ensure};
 use log::{error, info, warn};
-use prop_rs_android::{resetprop::ResetProp, sys_prop};
+use prop_rs_android::sys_prop;
 use rustix::process::chdir;
 
 use crate::{
-    defs,
-    init_event::{on_boot_completed, on_post_fs_data, on_services, run_stage},
-    ksucalls,
+    defs, init_event, ksucalls,
     module::ScriptWait,
-    utils::{self, switch_mnt_ns},
+    reboot::{self, Step},
+    utils::{self, getprop},
 };
 
-/// How long to wait for `system_server` to actually exit after the kill.
-const FRAMEWORK_DOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTRACT: &str = "ksud-framework-restart-v1";
+const DOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
+const LOG_PATH: &str = concat!("/data/adb/ksu/log/", "soft-reboot.log");
 
-const fn resetprop() -> ResetProp {
-    ResetProp {
-        skip_svc: true,
-        persistent: false,
-        persist_only: false,
-        verbose: false,
-        show_context: false,
-        rebuild: false,
-    }
-}
-
-fn reset_boot_completed() -> Result<()> {
-    sys_prop::init().context("Failed to initialize system property API")?;
-    let rp = resetprop();
-    // Set prop value to 0 in advance to ensure resetprop -w works
-    info!("reset boot complete prop to 0");
-    rp.set("sys.boot_completed", "0")
-        .context("Failed to set sys.boot_completed to 0")?;
+fn setprop(name: &str, value: &str, skip_svc: bool) -> Result<()> {
+    sys_prop::set(name, value, skip_svc).with_context(|| format!("Cannot set {name}={value}"))?;
     Ok(())
 }
 
-fn wait_for_boot_completed() -> Result<()> {
-    sys_prop::init().context("Failed to initialize system property API")?;
-    let rp = resetprop();
-    info!("waiting for boot complete");
-    rp.wait("sys.boot_completed", Some("0"), None)
-        .context("wait for sys.boot_completed failed")?;
-    Ok(())
-}
-
-fn system_server_running() -> bool {
-    Command::new("pidof")
-        .arg("system_server")
-        .output()
-        .map_or(true, |output| !output.stdout.is_empty())
-}
-
-/// Restart only the Android framework.
-///
-/// This is deliberately *not* init's blanket `stop`/`start` that a stock
-/// `ksud soft-reboot` runs. `stop` tears the whole display stack down; on a
-/// foldable the cover panel then comes back with stale DPMS/PSR state, which
-/// shows up as a small fixed artifact (the "three dots"). Re-initialising the
-/// panel afterwards is not possible from userspace - restarting the composer HAL
-/// escalates to a RescueParty/recovery boot and unbinding the panel driver
-/// panics the kernel - so the panel must not be staled in the first place.
-///
-/// Killing only `system_server` is enough. init restarts it (and `zygote64`, so
-/// a Zygisk/Xposed module installed after the LKM load is re-injected) while
-/// SurfaceFlinger and the composer HAL keep running.
-fn restart_framework() -> Result<()> {
-    let status = Command::new("killall")
-        .args(["-9", "system_server"])
-        .status()
-        .context("killall system_server failed")?;
-    if !status.success() {
-        warn!("killall exited with status: {status}");
-    }
-
-    let deadline = Instant::now() + FRAMEWORK_DOWN_TIMEOUT;
-    while Instant::now() < deadline {
-        if !system_server_running() {
-            return Ok(());
-        }
+fn wait_property(name: &str, value: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while getprop(name).as_deref() != Some(value) {
+        ensure!(
+            Instant::now() < deadline,
+            "Timed out waiting for {name}={value}"
+        );
         sleep(Duration::from_millis(100));
     }
-    warn!("system_server still running after killall; continuing");
     Ok(())
 }
 
-pub fn soft_reboot() -> Result<()> {
-    // check it avoid user click "soft_reboot" in manager when version mismatch
-    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
-        error!("{e:#}, skip soft_reboot");
+fn stop_runtime(service: &str) -> Result<()> {
+    // An explicit stop sets SVC_DISABLED: init neither auto-restarts the zygote
+    // nor executes its onrestart actions (which can disturb native services).
+    setprop("ctl.stop", service, false)?;
+    wait_property(&format!("init.svc.{service}"), "stopped", DOWN_TIMEOUT)?;
+    if service == "zygote" {
+        let output = Command::new("/system/bin/pidof")
+            .arg("system_server")
+            .output()?;
+        ensure!(
+            output.stdout.is_empty() && output.status.code() == Some(1),
+            "system_server is still running after zygote stopped"
+        );
+    }
+    Ok(())
+}
+
+fn prepare_restart() -> Result<()> {
+    setprop("sys.boot_completed", "0", true)?;
+    // Discount only this deliberate restart. Preserve real crash history,
+    // observer XML, persisted mitigation counts and the recovery watchdog itself.
+    for name in ["crashrecovery.rescue_boot_count", "sys.rescue_boot_count"] {
+        if let Some(count) = getprop(name).and_then(|s| s.parse::<u32>().ok()) {
+            setprop(name, &count.saturating_sub(1).to_string(), false)?;
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint(log: &mut File, message: &str) {
+    info!("soft-reboot: {message}");
+    // Logging failure must never prevent the error path from resuming Android.
+    if let Err(error) = writeln!(log, "{message}").and_then(|()| log.sync_data()) {
+        warn!("Cannot persist soft-reboot status: {error}");
+    }
+}
+
+/// Both app and CLI callers use this implementation; --check is a non-mutating
+/// capability handshake, --status exports only this operation's diagnostic record.
+pub fn soft_reboot(check: bool, status: bool) -> Result<()> {
+    if check {
+        println!("{CONTRACT}");
         return Ok(());
     }
+    if status {
+        print!(
+            "{}",
+            std::fs::read_to_string(LOG_PATH).context("No soft-reboot report")?
+        );
+        return Ok(());
+    }
+    ksucalls::ensure_uapi_version_matched()?;
+    let _lock = crate::module::lock_module_state()?;
+    ensure!(
+        getprop("sys.boot_completed").as_deref() == Some("1"),
+        "Android is still booting"
+    );
+    sys_prop::init().context("Failed to initialize property API")?;
+    let mut properties = Vec::new();
+    sys_prop::for_each(|name, value| {
+        if name.starts_with("init.svc.zygote") {
+            properties.push((name.to_owned(), value.to_owned()));
+        }
+    });
+    let services = reboot::running_services(&properties)?;
+    utils::ensure_dir_exists(defs::LOG_DIR)?;
+    let mut log = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(LOG_PATH)?;
+    log.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    checkpoint(
+        &mut log,
+        &format!(
+            "contract={CONTRACT} daemon={} driver={} uapi={}",
+            defs::VERSION_CODE,
+            ksucalls::get_version(),
+            ksucalls::uapi_version()
+        ),
+    );
+    for name in [
+        "ro.build.version.sdk",
+        "ro.zygote",
+        "sys.boot_completed",
+        "init.svc.surfaceflinger",
+    ] {
+        checkpoint(
+            &mut log,
+            &format!("{name}={}", getprop(name).unwrap_or_default()),
+        );
+    }
 
-    utils::daemonize_with(true, || -> Result<()> {
-        switch_mnt_ns(1)?;
+    utils::daemonize_with(true, || {
+        utils::switch_mnt_ns(1)?;
         chdir("/")?;
         Ok(())
     })?;
 
-    info!("emulating soft_reboot!");
-    if let Err(e) = reset_boot_completed() {
-        warn!("reset boot completed failed: {e}");
-    }
-    run_stage(
-        "emulated-soft-reboot",
-        ScriptWait::Until(Instant::now() + defs::EMULATED_SOFT_REBOOT_TIMEOUT),
+    let result = reboot::restart(&services, |step| {
+        checkpoint(&mut log, &format!("begin={step:?}"));
+        let result = match step {
+            Step::Stop(service) => stop_runtime(service),
+            Step::Prepare => prepare_restart(),
+            Step::QuiesceModules => init_event::run_stage_checked(
+                "emulated-soft-reboot",
+                ScriptWait::FinishBy(Instant::now() + defs::EMULATED_SOFT_REBOOT_TIMEOUT),
+            ),
+            Step::PostFsData => init_event::on_post_fs_data(true),
+            Step::Start(service) => setprop("ctl.start", service, false).and_then(|()| {
+                wait_property(&format!("init.svc.{service}"), "running", DOWN_TIMEOUT)
+            }),
+            Step::Services => init_event::on_services(),
+            Step::WaitBoot => wait_property("sys.boot_completed", "1", BOOT_TIMEOUT),
+            Step::BootCompleted => init_event::on_boot_completed(),
+        };
+        if let Err(error) = &result {
+            checkpoint(&mut log, &format!("failed={step:?} error={error:#}"));
+        }
+        result
+    });
+    checkpoint(
+        &mut log,
+        if result.is_ok() {
+            "result=complete"
+        } else {
+            "result=failed"
+        },
     );
-
-    info!("restarting the framework (zygote + system_server)");
-    restart_framework()?;
-
-    // `post-fs-data` has to run while the framework is down, which is why it
-    // goes before the wait for BOOT_COMPLETED; `service` and `boot-completed`
-    // run once it is back, exactly like a real boot.
-    info!("post-fs-data");
-    on_post_fs_data()?;
-
-    if let Err(e) = wait_for_boot_completed() {
-        warn!("wait for boot completed failed: {e}");
+    if let Err(error) = &result {
+        error!("soft-reboot failed: {error:#}");
     }
-    info!("services");
-    on_services();
-    on_boot_completed();
-
-    unsafe {
-        _exit(0);
-    }
+    result
 }

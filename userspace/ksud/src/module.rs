@@ -16,17 +16,14 @@ use regex_lite::Regex;
 use std::{
     collections::{BTreeMap, HashMap},
     env::var as env_var,
-    fs::{File, Permissions, canonicalize, remove_dir_all, set_permissions},
+    fs::{File, Permissions, canonicalize, set_permissions},
     io::Cursor,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
     time::Instant,
 };
-use std::{
-    fs::{copy, rename},
-    io::Write,
-};
+use std::{fs::copy, io::Write};
 use zip_extensions::inflate::zip_extract::zip_extract_file_to_memory;
 
 use crate::defs::{MODULE_DIR, MODULE_UPDATE_DIR, UPDATE_FILE_NAME};
@@ -137,7 +134,11 @@ pub fn foreach_module(
         ModuleType::Updated => MODULE_UPDATE_DIR,
         _ => defs::MODULE_DIR,
     });
-    let dir = std::fs::read_dir(modules_dir)?;
+    let dir = match std::fs::read_dir(modules_dir) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     for entry in dir.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -186,6 +187,8 @@ pub enum ScriptWait {
     NoWait,
     Forever,
     Until(Instant),
+    /// Restart activation must finish, not leave scripts racing the new runtime.
+    FinishBy(Instant),
 }
 
 struct SigchldBlock {
@@ -319,6 +322,13 @@ pub fn exec_script_with<T: AsRef<Path>>(
         );
     }
 
+    if let ScriptWait::FinishBy(deadline) = wait {
+        ensure!(
+            Instant::now() < deadline,
+            "Module stage deadline expired before {}",
+            path.as_ref().display()
+        );
+    }
     let sigchld = SigchldBlock::block().context("Failed to block SIGCHLD")?;
     let original_sigmask = sigchld.previous;
     let mut command = Command::new(assets::BUSYBOX_PATH);
@@ -332,7 +342,7 @@ pub fn exec_script_with<T: AsRef<Path>>(
             {
                 return Err(std::io::Error::last_os_error());
             }
-            detach_process_group(true);
+            detach_process_group(!matches!(wait, ScriptWait::FinishBy(_)));
             // ignore the error?
             switch_cgroups();
             Ok(())
@@ -347,7 +357,13 @@ pub fn exec_script_with<T: AsRef<Path>>(
 
     let result = match wait {
         ScriptWait::NoWait => command.spawn().map(|_| ()),
-        ScriptWait::Forever => command.status().map(|_| ()),
+        ScriptWait::Forever => command.status().and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!("Script failed: {status}")))
+            }
+        }),
         ScriptWait::Until(deadline) => command.spawn().and_then(|child| {
             // Once the shared deadline has passed, launch later scripts without waiting.
             if deadline > Instant::now()
@@ -357,6 +373,9 @@ pub fn exec_script_with<T: AsRef<Path>>(
             }
             Ok(())
         }),
+        ScriptWait::FinishBy(deadline) => command
+            .spawn()
+            .and_then(|mut child| crate::script_wait::finish_by(&mut child, deadline)),
     };
     result.map_err(|e| anyhow!("Failed to exec {}: {e}", path.as_ref().display()))
 }
@@ -364,7 +383,12 @@ pub fn exec_script_with<T: AsRef<Path>>(
 pub fn exec_stage_script(stage: &str, wait: ScriptWait) -> Result<()> {
     let metamodule_dir = metamodule::get_metamodule_path().and_then(|path| canonicalize(path).ok());
 
-    foreach_active_module(|module| {
+    let module_type = if stage == "emulated-soft-reboot" {
+        All
+    } else {
+        Active
+    };
+    foreach_module(module_type, |module| {
         if metamodule_dir.as_ref().is_some_and(|meta_dir| {
             canonicalize(module).is_ok_and(|resolved| resolved == *meta_dir)
         }) {
@@ -420,7 +444,7 @@ pub fn load_system_prop() -> Result<()> {
     Ok(())
 }
 
-pub fn prune_modules() -> Result<()> {
+pub fn prune_modules(wait: ScriptWait) -> Result<()> {
     foreach_module(All, |module| {
         if !module.join(defs::REMOVE_FILE_NAME).exists() {
             return Ok(());
@@ -440,15 +464,21 @@ pub fn prune_modules() -> Result<()> {
             if let Err(e) = metamodule::remove_symlink() {
                 warn!("Failed to remove metamodule symlink: {e}");
             }
-        } else if let Err(e) = metamodule::exec_metauninstall_script(module_id) {
+        } else if let Err(e) = metamodule::exec_metauninstall_script(module_id, wait) {
+            if matches!(wait, ScriptWait::FinishBy(_)) {
+                return Err(e);
+            }
             warn!("Failed to exec metamodule uninstall for {module_id}: {e}");
         }
 
         // Then execute module's own uninstall.sh
         let uninstaller = module.join("uninstall.sh");
         if uninstaller.exists()
-            && let Err(e) = exec_script(uninstaller, ScriptWait::Forever)
+            && let Err(e) = exec_script(uninstaller, wait)
         {
+            if matches!(wait, ScriptWait::FinishBy(_)) {
+                return Err(e);
+            }
             warn!("Failed to exec uninstaller: {e}");
         }
 
@@ -457,10 +487,8 @@ pub fn prune_modules() -> Result<()> {
             warn!("Failed to clear configs for {module_id}: {e}");
         }
 
-        // Finally remove the module directory
-        if let Err(e) = remove_dir_all(module) {
-            warn!("Failed to remove {}: {e}", module.display());
-        }
+        // Existing mounts can still refer to the old files until the kernel reboots.
+        crate::module_state::retire(module, Path::new(defs::HOT_INSTALL_TRASH_DIR))?;
 
         Ok(())
     })?;
@@ -648,6 +676,11 @@ pub fn regenerate_preinit() -> Result<()> {
     rc.and(preinit)
 }
 
+pub fn lock_module_state() -> Result<File> {
+    ensure_dir_exists(defs::WORKING_DIR)?;
+    crate::module_state::lock(&Path::new(defs::WORKING_DIR).join("module.lock"))
+}
+
 pub fn handle_updated_modules() -> Result<()> {
     let modules_root = Path::new(MODULE_DIR);
     foreach_module(ModuleType::Updated, |updated_module| {
@@ -657,26 +690,18 @@ pub fn handle_updated_modules() -> Result<()> {
 
         if let Some(name) = updated_module.file_name() {
             let module_dir = modules_root.join(name);
-            let mut disabled = false;
-            let mut removed = false;
-            if module_dir.exists() {
-                // If the old module is disabled, we need to also disable the new one
-                disabled = module_dir.join(defs::DISABLE_FILE_NAME).exists();
-                removed = module_dir.join(defs::REMOVE_FILE_NAME).exists();
-                remove_dir_all(&module_dir)?;
-            }
-            rename(updated_module, &module_dir)?;
+            let disabled = module_dir.join(defs::DISABLE_FILE_NAME).exists();
+            let removed = module_dir.join(defs::REMOVE_FILE_NAME).exists();
             if removed {
-                let path = module_dir.join(defs::REMOVE_FILE_NAME);
-                if let Err(e) = ensure_file_exists(&path) {
-                    warn!("Failed to create {}: {e}", path.display());
-                }
+                ensure_file_exists(updated_module.join(defs::REMOVE_FILE_NAME))?;
             } else if disabled {
-                let path = module_dir.join(defs::DISABLE_FILE_NAME);
-                if let Err(e) = ensure_file_exists(&path) {
-                    warn!("Failed to create {}: {e}", path.display());
-                }
+                ensure_file_exists(updated_module.join(defs::DISABLE_FILE_NAME))?;
             }
+            crate::module_state::replace(
+                updated_module,
+                &module_dir,
+                Path::new(defs::HOT_INSTALL_TRASH_DIR),
+            )?;
         }
         Ok(())
     })?;

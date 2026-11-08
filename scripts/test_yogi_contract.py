@@ -47,6 +47,7 @@ class YogiContractTest(unittest.TestCase):
             self.assertIn(f"{key}: ${{{{ needs.generate-key.outputs.{key}", manager)
             self.assertNotIn(f"{key}2:", manager)
         self.assertIn('"uapiVersion": 6', manager)
+        self.assertIn('"softRebootContract": "ksud-framework-restart-v1"', manager)
         self.assertIn('"upstreamCommit": "96770dfb807fea61e06819e4cbb438384df54b63"', manager)
         self.assertIn("KERNEL_SU_UAPI_VERSION = 6;", source("uapi/supercall.h"))
         self.assertIn("kmi: android16-6.12", source(".github/workflows/ghostlock-lkm.yml"))
@@ -67,15 +68,21 @@ class YogiContractTest(unittest.TestCase):
         restart = re.sub(r"//[^\n]*", "", source("userspace/ksud/src/soft_reboot.rs"))
         self.assertNotRegex(restart, r'Command::new\("(?:stop|start|rmmod)"\)')
         self.assertNotRegex(restart, r"delete_module|insmod|unload::")
-        self.assertIn('.args(["-9", "system_server"])', restart)
-        self.assertIn("ScriptWait::Until", restart)
-        body = restart[restart.index("pub fn soft_reboot()") :]
-        ordered = ["ensure_uapi_version_matched", "restart_framework()?", "on_post_fs_data()?",
-                   "wait_for_boot_completed()", "on_services()", "on_boot_completed()"]
-        positions = [body.index(token) for token in ordered]
-        self.assertEqual(positions, sorted(positions))
-        self.assertEqual(body.count("on_services()"), 1)
+        self.assertNotIn('Command::new("killall")', restart)
+        self.assertIn('setprop("ctl.stop", service, false)?', restart)
+        self.assertIn('setprop("ctl.start", service, false)', restart)
+        self.assertIn("reboot::running_services(&properties)?", restart)
+        self.assertIn("ScriptWait::FinishBy", restart)
+        self.assertIn("reboot::restart(&services", restart)
+        self.assertIn("init_event::on_post_fs_data(true)", restart)
+        self.assertIn("lock_module_state()?", restart)
         self.assertNotIn("on_post_data_fs", restart)
+        sequence = source("userspace/ksud/src/reboot.rs")
+        ordered = ["perform(Step::Stop", "perform(Step::Prepare", "perform(Step::QuiesceModules",
+                   "perform(Step::PostFsData", "perform(Step::Services", "perform(Step::Start",
+                   "perform(Step::WaitBoot", "perform(Step::BootCompleted"]
+        positions = [sequence.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
 
     def test_real_report_event_resets_services_without_reloading_driver(self):
         dispatch = source("kernel/supercall/dispatch.c")

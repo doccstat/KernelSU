@@ -36,6 +36,15 @@ jobs:
         with:
           ndk-version: r29
 
+      - name: Test runtime restart and module transactions
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          for unit in reboot:: module_state:: script_wait::; do
+            cargo test --locked -p ksud "$unit"
+          done
+          python3 scripts/test_yogi_contract.py -v
+
       - name: Run clippy
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
