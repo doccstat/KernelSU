@@ -65,8 +65,15 @@ enum Commands {
         package_name: String,
     },
 
-    /// Emulate system reboot
-    SoftReboot,
+    /// Restart Android's runtime and activate modules without rebooting the kernel
+    SoftReboot {
+        /// Print the supported restart contract without restarting
+        #[arg(long, conflicts_with = "status")]
+        check: bool,
+        /// Export the last restart's private, operation-only diagnostic report
+        #[arg(long)]
+        status: bool,
+    },
 
     /// Load a kernel module with kallsyms access
     Insmod {
@@ -528,18 +535,26 @@ pub fn run() -> Result<()> {
     log::info!("command: {:?}", cli.command);
 
     let result = match cli.command {
-        Commands::PostFsData => init_event::on_post_fs_data(),
-        Commands::BootCompleted => {
-            init_event::on_boot_completed();
-            Ok(())
+        Commands::PostFsData => {
+            let _lock = module::lock_module_state()?;
+            init_event::on_post_fs_data(false)
         }
+        Commands::BootCompleted => init_event::on_boot_completed(),
 
-        Commands::SoftReboot => crate::soft_reboot::soft_reboot(),
+        Commands::SoftReboot { check, status } => crate::soft_reboot::soft_reboot(check, status),
 
         Commands::Insmod { module, params } => debug::insmod(&module, &params),
 
         Commands::Module { command } => {
             utils::switch_mnt_ns(1)?;
+            let _lock = match &command {
+                Module::Install { .. }
+                | Module::UndoUninstall { .. }
+                | Module::Uninstall { .. }
+                | Module::Enable { .. }
+                | Module::Disable { .. } => Some(module::lock_module_state()?),
+                _ => None,
+            };
             match command {
                 Module::Install { zip } => module::install_module(&zip),
                 Module::UndoUninstall { id } => module::undo_uninstall_module(&id),
@@ -685,8 +700,7 @@ pub fn run() -> Result<()> {
                 info!("KernelSU not available, exiting services");
                 std::process::exit(0);
             }
-            init_event::on_services();
-            Ok(())
+            init_event::on_services()
         }
         Commands::Sulogd => sulog::run_sulogd(),
         Commands::Profile { command } => match command {

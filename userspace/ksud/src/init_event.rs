@@ -5,14 +5,21 @@ use crate::{
     utils::{self},
 };
 use anyhow::{Context, Result};
-use log::{error, info, warn};
+use log::{info, warn};
 use std::{path::Path, time::Instant};
 
-pub fn on_post_fs_data() -> Result<()> {
-    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
-        error!("{e:#}, skip on_post_fs_data");
-        return Ok(());
-    }
+pub fn on_post_fs_data(soft_reboot: bool) -> Result<()> {
+    ksucalls::ensure_uapi_version_matched()?;
+    let checked = |result: Result<()>| -> Result<()> {
+        if soft_reboot {
+            result
+        } else {
+            if let Err(error) = result {
+                warn!("{error:#}");
+            }
+            Ok(())
+        }
+    };
 
     ksucalls::report_post_fs_data();
 
@@ -32,24 +39,21 @@ pub fn on_post_fs_data() -> Result<()> {
     }
 
     let safe_mode = crate::utils::is_safe_mode();
-    let wait = ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT);
-
-    if safe_mode {
-        // we should still ensure module directory exists in safe mode
-        // because we may need to operate the module dir in safe mode
-        warn!("safe mode, skip common post-fs-data.d scripts");
+    let deadline = Instant::now() + defs::BOOT_STAGE_TIMEOUT;
+    let wait = if soft_reboot {
+        ScriptWait::FinishBy(deadline)
     } else {
-        // Then exec common post-fs-data scripts
-        if let Err(e) = crate::module::exec_common_scripts("post-fs-data.d", wait) {
-            warn!("exec common post-fs-data scripts failed: {e}");
-        }
-    }
+        ScriptWait::Until(deadline)
+    };
 
     let module_dir = defs::MODULE_DIR;
+    utils::ensure_dir_exists(module_dir)?;
 
     assets::ensure_binaries(true).with_context(|| "Failed to extract bin assets")?;
 
-    crate::hot_install::clean_trash();
+    if !soft_reboot {
+        crate::hot_install::clean_trash();
+    }
 
     // if we are in safe mode, we should disable all modules
     if safe_mode {
@@ -60,13 +64,21 @@ pub fn on_post_fs_data() -> Result<()> {
         return Ok(());
     }
 
-    if let Err(e) = handle_updated_modules() {
-        warn!("handle updated modules failed: {e}");
-    }
+    checked(handle_updated_modules().context("Applying module updates failed"))?;
+    checked(
+        prune_modules(if soft_reboot {
+            wait
+        } else {
+            ScriptWait::Forever
+        })
+        .context("Pruning modules failed"),
+    )?;
 
-    if let Err(e) = prune_modules() {
-        warn!("prune modules failed: {e}");
-    }
+    // Hooks must see the generation being activated, not the one just replaced.
+    checked(
+        crate::module::exec_common_scripts("post-fs-data.d", wait)
+            .context("Common post-fs-data scripts failed"),
+    )?;
 
     // Refresh /metadata/watchdog/ksu/{modules.rc,preinit/} so the next boot's kernel hook sees the
     // current module set. Acts as a safety net when state was changed outside
@@ -98,14 +110,16 @@ pub fn on_post_fs_data() -> Result<()> {
     }
 
     // execute metamodule post-fs-data script first (priority)
-    if let Err(e) = metamodule::exec_stage_script("post-fs-data", wait) {
-        warn!("exec metamodule post-fs-data script failed: {e}");
-    }
+    checked(
+        metamodule::exec_stage_script("post-fs-data", wait)
+            .context("Metamodule post-fs-data failed"),
+    )?;
 
     // exec modules post-fs-data scripts
-    if let Err(e) = crate::module::exec_stage_script("post-fs-data", wait) {
-        warn!("exec post-fs-data scripts failed: {e}");
-    }
+    checked(
+        crate::module::exec_stage_script("post-fs-data", wait)
+            .context("Module post-fs-data failed"),
+    )?;
 
     // load system.prop
     if let Err(e) = crate::module::load_system_prop() {
@@ -113,11 +127,16 @@ pub fn on_post_fs_data() -> Result<()> {
     }
 
     // execute metamodule mount script
-    if let Err(e) = metamodule::exec_mount_script(module_dir) {
-        warn!("execute metamodule mount failed: {e}");
-    }
+    let mount_wait = if soft_reboot {
+        wait
+    } else {
+        ScriptWait::Forever
+    };
+    checked(
+        metamodule::exec_mount_script(module_dir, mount_wait).context("Metamodule mount failed"),
+    )?;
 
-    run_stage("post-mount", wait);
+    checked(run_stage_checked("post-mount", wait))?;
 
     std::env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
 
@@ -125,67 +144,62 @@ pub fn on_post_fs_data() -> Result<()> {
 }
 
 pub fn run_stage(stage: &str, wait: ScriptWait) {
+    if let Err(error) = run_stage_checked(stage, wait) {
+        warn!("{stage} failed: {error:#}");
+    }
+}
+
+pub fn run_stage_checked(stage: &str, wait: ScriptWait) -> Result<()> {
     utils::umask(0);
 
     if utils::has_magisk() {
         warn!("Magisk detected, skip {stage}");
-        return;
+        return Ok(());
     }
 
     if crate::utils::is_safe_mode() {
         warn!("safe mode, skip {stage} scripts");
-        return;
+        return Ok(());
     }
 
-    if let Err(e) = crate::module::exec_common_scripts(&format!("{stage}.d"), wait) {
-        warn!("Failed to exec common {stage} scripts: {e}");
-    }
-
-    // execute metamodule stage script first (priority)
-    if let Err(e) = metamodule::exec_stage_script(stage, wait) {
-        warn!("Failed to exec metamodule {stage} script: {e}");
-    }
-
-    // execute regular modules stage scripts
-    if let Err(e) = crate::module::exec_stage_script(stage, wait) {
-        warn!("Failed to exec {stage} scripts: {e}");
-    }
+    let checked = |result: Result<()>| -> Result<()> {
+        if matches!(wait, ScriptWait::FinishBy(_) | ScriptWait::NoWait) {
+            result
+        } else {
+            if let Err(error) = result {
+                warn!("{stage} script failed: {error:#}");
+            }
+            Ok(())
+        }
+    };
+    checked(crate::module::exec_common_scripts(
+        &format!("{stage}.d"),
+        wait,
+    ))?;
+    checked(metamodule::exec_stage_script(stage, wait))?;
+    checked(crate::module::exec_stage_script(stage, wait))
 }
 
-pub fn on_services() {
-    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
-        error!("{e:#}, skip on_services");
-        return;
-    }
-
-    match ksucalls::report_services() {
-        Ok(true) => {}
-        Ok(false) => {
-            info!("services already started, skipping");
-            return;
-        }
-        Err(e) => {
-            error!("Failed to report services: {e:#}");
-            return;
-        }
+pub fn on_services() -> Result<()> {
+    ksucalls::ensure_uapi_version_matched()?;
+    if !ksucalls::report_services()? {
+        info!("services already started, skipping");
+        return Ok(());
     }
 
     info!("on_services triggered!");
-    run_stage("service", ScriptWait::NoWait);
+    run_stage_checked("service", ScriptWait::NoWait)
 }
 
-pub fn on_boot_completed() {
-    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
-        error!("{e:#}, skip on_boot_completed");
-        return;
-    }
+pub fn on_boot_completed() -> Result<()> {
+    ksucalls::ensure_uapi_version_matched()?;
 
     ksucalls::report_boot_complete();
     info!("on_boot_completed triggered!");
 
     crate::preinit::on_boot_completed();
 
-    run_stage("boot-completed", ScriptWait::NoWait);
+    run_stage_checked("boot-completed", ScriptWait::NoWait)
 }
 
 fn catch_bootlog(logname: &str, command: &[&str]) -> Result<()> {

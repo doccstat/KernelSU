@@ -383,6 +383,7 @@ jobs:
             "sourceCommit": "$GITHUB_SHA",
             "upstreamCommit": "96770dfb807fea61e06819e4cbb438384df54b63",
             "uapiVersion": 6,
+            "softRebootContract": "ksud-framework-restart-v1",
             "versionCode": $version_code,
             "versionName": "$version_name",
             "asset": "GhostLock-manager.apk",

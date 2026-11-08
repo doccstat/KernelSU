@@ -42,14 +42,20 @@ mod metamodule;
 mod module;
 #[cfg(target_os = "android")]
 mod module_config;
+#[cfg(any(target_os = "android", test))]
+mod module_state;
 #[cfg(target_os = "android")]
 mod preinit;
 #[cfg(target_os = "android")]
 mod profile;
+#[cfg(any(target_os = "android", test))]
+mod reboot;
 #[cfg(target_os = "android")]
 mod resetprop;
 #[cfg(target_os = "android")]
 mod restorecon;
+#[cfg(any(target_os = "android", test))]
+mod script_wait;
 #[cfg(target_os = "android")]
 mod sepolicy;
 #[cfg(target_os = "android")]

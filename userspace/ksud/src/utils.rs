@@ -280,7 +280,7 @@ pub fn uninstall(package_name: &str) -> Result<()> {
     if Path::new(defs::MODULE_DIR).exists() {
         println!("- Uninstall modules..");
         module::uninstall_all_modules()?;
-        module::prune_modules()?;
+        module::prune_modules(module::ScriptWait::Forever)?;
     }
     println!("- Removing directories..");
     std::fs::remove_dir_all(defs::WORKING_DIR).ok();

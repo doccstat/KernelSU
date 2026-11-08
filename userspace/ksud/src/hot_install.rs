@@ -10,10 +10,10 @@ use crate::{
     assets, defs,
     module::{ScriptWait, exec_script_with},
     sepolicy,
-    utils::{ensure_dir_exists, is_safe_mode, switch_mnt_ns},
+    utils::{is_safe_mode, switch_mnt_ns},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use log::{info, warn};
 
 use std::{
@@ -21,7 +21,7 @@ use std::{
     os::unix::process::CommandExt,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 pub struct Request {
@@ -81,40 +81,12 @@ fn check(module_id: &str, is_metamodule: bool, request: &Request) -> Result<Opti
     check_run_script(&Path::new(defs::MODULE_UPDATE_DIR).join(module_id), script)
 }
 
-/// Move the live module dir out of the way. Running processes and existing mounts may still
-/// reference it, so it is only deleted on the next boot.
-fn stash(live_dir: &Path, module_id: &str) -> Result<PathBuf> {
-    ensure_dir_exists(defs::HOT_INSTALL_TRASH_DIR)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let target = Path::new(defs::HOT_INSTALL_TRASH_DIR).join(format!("{module_id}.{nanos}"));
-    // Never delete the live dir here: on failure the regular update path still needs it
-    rename(live_dir, &target).with_context(|| format!("Failed to move {}", live_dir.display()))?;
-    Ok(target)
-}
-
 fn swap(module_id: &str) -> Result<()> {
-    let staged_dir = Path::new(defs::MODULE_UPDATE_DIR).join(module_id);
-    let live_dir = Path::new(defs::MODULE_DIR).join(module_id);
-
-    let stashed = if live_dir.exists() {
-        Some(stash(&live_dir, module_id)?)
-    } else {
-        None
-    };
-
-    if let Err(e) = rename(&staged_dir, &live_dir) {
-        // Put the old dir back so the regular update-on-reboot path still works
-        if let Some(old) = stashed
-            && let Err(e) = rename(&old, &live_dir)
-        {
-            warn!("Failed to restore {}: {e}", live_dir.display());
-        }
-        return Err(e).with_context(|| format!("Failed to move {}", staged_dir.display()));
-    }
-    Ok(())
+    crate::module_state::replace(
+        &Path::new(defs::MODULE_UPDATE_DIR).join(module_id),
+        &Path::new(defs::MODULE_DIR).join(module_id),
+        Path::new(defs::HOT_INSTALL_TRASH_DIR),
+    )
 }
 
 /// Try to apply the staged module right away. Returns false if the caller should fall back to

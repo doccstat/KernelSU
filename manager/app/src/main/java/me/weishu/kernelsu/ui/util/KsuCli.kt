@@ -5,11 +5,14 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.Parcelable
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.system.Os
 import android.util.Log
+import android.widget.Toast
 import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.ShellUtils
@@ -18,6 +21,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import me.weishu.kernelsu.BuildConfig
 import me.weishu.kernelsu.Natives
+import me.weishu.kernelsu.R
 import me.weishu.kernelsu.core.tasks.BootKernelVersion
 import me.weishu.kernelsu.core.tasks.ExtractImage
 import me.weishu.kernelsu.core.tasks.ProbeResult
@@ -594,7 +598,15 @@ private fun readMagic(channel: DataSourceChannel): String {
 
 fun reboot(reason: String = "") {
     if (reason == "soft_reboot") {
-        execKsud("soft-reboot", true, true)
+        val result = withNewRootShell(globalMnt = true) {
+            newJob().add("${getKsuDaemonPath()} soft-reboot").to(ArrayList<String>(), ArrayList<String>()).exec()
+        }
+        if (!result.isSuccess) {
+            Log.e(TAG, "Soft restart rejected: ${result.err.joinToString("\n")}")
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(ksuApp, R.string.reboot_soft_failed, Toast.LENGTH_LONG).show()
+            }
+        }
         return
     }
     val shell = getRootShell()
