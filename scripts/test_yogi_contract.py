@@ -72,6 +72,7 @@ class YogiContractTest(unittest.TestCase):
         self.assertIn('setprop("ctl.stop", service, false)?', restart)
         self.assertIn('setprop("ctl.start", service, false)', restart)
         self.assertIn("reboot::running_services(&properties)?", restart)
+        self.assertIn('name == "init.svc.netd"', restart)
         self.assertIn("ScriptWait::FinishBy", restart)
         self.assertIn("reboot::restart(&services", restart)
         self.assertIn("init_event::on_post_fs_data(true)", restart)

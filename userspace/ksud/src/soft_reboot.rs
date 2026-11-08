@@ -101,7 +101,7 @@ pub fn soft_reboot(check: bool, status: bool) -> Result<()> {
     sys_prop::init().context("Failed to initialize property API")?;
     let mut properties = Vec::new();
     sys_prop::for_each(|name, value| {
-        if name.starts_with("init.svc.zygote") {
+        if name == "init.svc.netd" || name.starts_with("init.svc.zygote") {
             properties.push((name.to_owned(), value.to_owned()));
         }
     });
@@ -129,6 +129,7 @@ pub fn soft_reboot(check: bool, status: bool) -> Result<()> {
         "ro.zygote",
         "sys.boot_completed",
         "init.svc.surfaceflinger",
+        "init.svc.netd",
     ] {
         checkpoint(
             &mut log,
