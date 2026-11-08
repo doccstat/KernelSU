@@ -8,9 +8,11 @@ su -c '/data/adb/ksud soft-reboot'
 ```
 
 The daemon explicitly stops all running `zygote`/`zygote_*` init services
-(including secondary and prewarmed slots), applies module changes while they remain stopped, launches module services,
-and resumes the runtime. SurfaceFlinger, composer and loaded kernel modules
-are not restarted. Concurrent installs, toggles and restarts are rejected rather
+(including secondary and prewarmed slots), then stops the running `netd` dependency.
+It applies module changes while they remain stopped, launches module services,
+and starts `netd` before resuming ART. This refreshes DNS resolver's one-shot
+system-server registration; a stopped or absent `netd` is left unchanged.
+SurfaceFlinger, composer and loaded kernel modules are not restarted. Concurrent installs, toggles and restarts are rejected rather
 than interleaved. Failure resumes the runtime and records the failing stage;
 there is no automatic full reboot or display-stack fallback.
 

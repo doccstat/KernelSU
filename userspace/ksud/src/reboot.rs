@@ -13,32 +13,33 @@ pub enum Step<'a> {
     BootCompleted,
 }
 
-/// Include auxiliary ART services (secondary, prewarmed/next slots), but never
-/// native services. Stop the primary last and resume it first.
+/// Stop auxiliary ART slots, primary ART, then the running network dependency.
+/// Reverse startup refreshes netd's one-shot system_server registration before ART;
+/// native display services are never included.
 pub fn running_services(properties: &[(String, String)]) -> Result<Vec<&str>> {
     let mut services = Vec::new();
     for (name, state) in properties {
         let Some(service) = name.strip_prefix("init.svc.") else {
             continue;
         };
-        if service != "zygote" && !service.starts_with("zygote_") {
+        if service != "netd" && service != "zygote" && !service.starts_with("zygote_") {
             continue;
         }
         match state.as_str() {
             "running" => services.push(service),
             "stopped" => {}
-            _ => bail!("Android runtime service {service} is not stable: {state}"),
+            _ => bail!("Android service {service} is not stable: {state}"),
         }
     }
     ensure!(
         services.contains(&"zygote"),
         "Android zygote is not running"
     );
-    services.sort_unstable_by_key(|service| (*service == "zygote", *service));
+    services.sort_unstable_by_key(|service| (*service == "netd", *service == "zygote", *service));
     Ok(services)
 }
 
-/// `services` contains only running ART services, primary last.
+/// `services` contains running ART slots followed by netd when it is running.
 /// Explicit init stops hold them down; a signal alone lets init race module activation.
 pub fn restart<'a>(
     services: &[&'a str],
@@ -79,6 +80,7 @@ mod tests {
             vec!["zygote"],
             vec!["zygote_secondary", "zygote"],
             vec!["zygote_next", "zygote_secondary", "zygote"],
+            vec!["zygote_next", "zygote", "netd"],
         ] {
             let mut running: BTreeSet<_> = services.iter().copied().collect();
             let mut events = Vec::new();
@@ -126,6 +128,7 @@ mod tests {
             ("init.svc.zygote", "running"),
             ("init.svc.zygote_secondary", "stopped"),
             ("init.svc.zygote_next", "running"),
+            ("init.svc.netd", "running"),
             ("init.svc.surfaceflinger", "running"),
             ("init.svc.vendor.composer", "restarting"),
             ("ro.zygote", "zygote64"),
@@ -134,8 +137,16 @@ mod tests {
         .into();
         assert_eq!(
             running_services(&properties).unwrap(),
+            ["zygote_next", "zygote", "netd"]
+        );
+        properties[3].1 = "stopped".into();
+        assert_eq!(
+            running_services(&properties).unwrap(),
             ["zygote_next", "zygote"]
         );
+        properties[3].1 = "restarting".into();
+        assert!(running_services(&properties).is_err());
+        properties[3].1 = "running".into();
         properties[1].1 = "restarting".into();
         assert!(running_services(&properties).is_err());
         properties[1].1 = "stopped".into();
@@ -149,16 +160,18 @@ mod tests {
         for failure in [
             Step::Stop("zygote_secondary"),
             Step::Stop("zygote"),
+            Step::Stop("netd"),
             Step::Prepare,
             Step::QuiesceModules,
             Step::PostFsData,
             Step::Start("zygote"),
             Step::Start("zygote_secondary"),
+            Step::Start("netd"),
             Step::Services,
             Step::WaitBoot,
         ] {
             let mut events = Vec::new();
-            let result = restart(&["zygote_secondary", "zygote"], |step| {
+            let result = restart(&["zygote_secondary", "zygote", "netd"], |step| {
                 events.push(step);
                 if step == failure {
                     bail!("injected failure");
@@ -167,6 +180,17 @@ mod tests {
             });
             assert!(result.is_err(), "{failure:?}");
             assert!(events.contains(&Step::Start("zygote")), "{failure:?}");
+            assert!(
+                events
+                    .iter()
+                    .position(|e| *e == Step::Start("netd"))
+                    .unwrap()
+                    < events
+                        .iter()
+                        .position(|e| *e == Step::Start("zygote"))
+                        .unwrap(),
+                "{failure:?}"
+            );
             assert!(
                 events.contains(&Step::Start("zygote_secondary")),
                 "{failure:?}"
