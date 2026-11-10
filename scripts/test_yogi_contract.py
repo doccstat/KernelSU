@@ -48,7 +48,7 @@ class YogiContractTest(unittest.TestCase):
             self.assertNotIn(f"{key}2:", manager)
         self.assertIn('"uapiVersion": 6', manager)
         self.assertIn('"softRebootContract": "ksud-framework-restart-v1"', manager)
-        self.assertIn('"upstreamCommit": "96770dfb807fea61e06819e4cbb438384df54b63"', manager)
+        self.assertIn('"upstreamCommit": "02ffbd447eb6a2f05d9f46e17b1e1c3bcfdd9971"', manager)
         self.assertIn("KERNEL_SU_UAPI_VERSION = 6;", source("uapi/supercall.h"))
         self.assertIn("kmi: android16-6.12", source(".github/workflows/ghostlock-lkm.yml"))
         self.assertIn("fetch-depth: 0", source(".github/workflows/ddk-lkm.yml"))
@@ -63,6 +63,10 @@ class YogiContractTest(unittest.TestCase):
         self.assertIn("    if: github.repository == 'tiann/KernelSU' || vars.ENABLE_PAGES == 'true'", pages)
         self.assertIn("    needs: build", pages)
         self.assertNotIn("enablement: true", pages)
+
+    def test_npm_publication_is_upstream_only(self):
+        npm = source(".github/workflows/npm.yml")
+        self.assertIn("    if: github.repository == 'tiann/KernelSU'", npm)
 
     def test_framework_only_restart_and_service_order(self):
         restart = re.sub(r"//[^\n]*", "", source("userspace/ksud/src/soft_reboot.rs"))
