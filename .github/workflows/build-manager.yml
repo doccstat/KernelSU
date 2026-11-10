@@ -381,7 +381,7 @@ jobs:
           {
             "package": "com.lixingchi.kernelsu",
             "sourceCommit": "$GITHUB_SHA",
-            "upstreamCommit": "96770dfb807fea61e06819e4cbb438384df54b63",
+            "upstreamCommit": "02ffbd447eb6a2f05d9f46e17b1e1c3bcfdd9971",
             "uapiVersion": 6,
             "softRebootContract": "ksud-framework-restart-v1",
             "versionCode": $version_code,
